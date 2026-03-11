@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\GetTenantByJidRequest;
 use App\Http\Requests\GetTenantByEspoIdRequest;
+use App\Http\Requests\GetTenantCatalogRequest;
 use App\Modules\TenantEntities\Contracts\TenantEntitiesServiceInterface;
 use App\Exceptions\ApiServiceException;
 use Illuminate\Support\Facades\Log;
@@ -44,6 +45,39 @@ class TenantController extends Controller
             return response()->json([
                 'status'  => 'error',
                 'message' => 'Error interno al obtener el tenant',
+                'result'  => [],
+            ], 500);
+        }
+    }
+
+    /**
+     * GET /api/v1/tenants/{tenantId}/catalog
+     */
+    public function catalog(GetTenantCatalogRequest $request, int $tenantId): JsonResponse
+    {
+        try {
+            $result = $this->tenantService->getCatalogByTenantId($tenantId);
+
+            return response()->json([
+                'status' => 'success',
+                'data'   => $result,
+            ], 200);
+        } catch (ApiServiceException $e) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => $e->getMessage(),
+                'result'  => [],
+            ], $e->getStatusCode());
+        } catch (\Throwable $e) {
+            Log::error('❌ Error inesperado obteniendo catálogo del tenant', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+                'tenant_id' => $tenantId,
+            ]);
+
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Error interno al obtener el catálogo del tenant',
                 'result'  => [],
             ], 500);
         }

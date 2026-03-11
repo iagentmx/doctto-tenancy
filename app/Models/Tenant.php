@@ -49,8 +49,18 @@ class Tenant extends Model
         return $this->hasMany(TenantLocation::class);
     }
 
+    public function resources()
+    {
+        return $this->hasMany(Resource::class);
+    }
+
     public function primaryLocation()
     {
         return $this->hasOne(TenantLocation::class)->where('is_primary', true);
+    }
+
+    public function tenantAdmins()
+    {
+        return $this->hasMany(TenantAdmin::class);
     }
 }

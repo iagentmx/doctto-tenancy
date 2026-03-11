@@ -30,4 +30,9 @@ class TenantLocation extends Model
     {
         return $this->belongsTo(Tenant::class);
     }
+
+    public function resources()
+    {
+        return $this->hasMany(Resource::class);
+    }
 }

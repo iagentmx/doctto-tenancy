@@ -10,6 +10,7 @@ use App\Repositories\Contracts\ServiceRepositoryInterface;
 use App\Repositories\Contracts\StaffRepositoryInterface;
 use App\Repositories\Contracts\StaffServiceRepositoryInterface;
 use App\Repositories\Contracts\TenantLocationRepositoryInterface;
+use Illuminate\Support\Facades\DB;
 
 final class UpsertStaffUseCase
 {
@@ -23,41 +24,43 @@ final class UpsertStaffUseCase
 
     public function execute(Tenant $tenant, array $payload): Staff
     {
-        $mapped = StaffToStaffMapper::map($tenant->id, $payload);
+        return DB::transaction(function () use ($tenant, $payload): Staff {
+            $mapped = StaffToStaffMapper::map($tenant->id, $payload);
 
-        $staff = $this->staffRepository->updateOrCreateStaff(
-            $mapped['criteria'],
-            $mapped['data']
-        );
+            $staff = $this->staffRepository->updateOrCreateStaff(
+                $mapped['criteria'],
+                $mapped['data']
+            );
 
-        $primaryLocation = $this->tenantLocationRepository->findPrimaryTenantLocationByTenantId($tenant->id);
+            $primaryLocation = $this->tenantLocationRepository->findPrimaryTenantLocationByTenantId($tenant->id);
 
-        if (! $primaryLocation) {
-            throw new EspoCrmWebhookException('No se encontró ubicación principal para el tenant.', 422);
-        }
+            if (! $primaryLocation) {
+                throw new EspoCrmWebhookException('No se encontró ubicación principal para el tenant.', 422);
+            }
 
-        // Horarios (igual que antes: delete + create)
-        $this->replaceStaffSchedules->execute($staff->id, $primaryLocation->id, $payload);
+            // Horarios (igual que antes: delete + create)
+            $this->replaceStaffSchedules->execute($tenant->id, $staff->id, $primaryLocation->id, $payload);
 
-        // STAFF SERVICES (igual que antes)
-        $serviceIds = [];
+            // STAFF SERVICES (igual que antes)
+            $serviceIds = [];
 
-        if (!empty($payload['servicesIds']) && is_array($payload['servicesIds'])) {
-            $services = $this->serviceRepository->allServices()
-                ->where('tenant_id', $tenant->id);
+            if (! empty($payload['servicesIds']) && is_array($payload['servicesIds'])) {
+                $services = $this->serviceRepository->allServices()
+                    ->where('tenant_id', $tenant->id);
 
-            foreach ($payload['servicesIds'] as $espocrmServiceId) {
+                foreach ($payload['servicesIds'] as $espocrmServiceId) {
 
-                $service = $services->firstWhere('espocrm_id', $espocrmServiceId);
+                    $service = $services->firstWhere('espocrm_id', $espocrmServiceId);
 
-                if ($service) {
-                    $serviceIds[] = $service->id;
+                    if ($service) {
+                        $serviceIds[] = $service->id;
+                    }
                 }
             }
-        }
 
-        $this->staffServiceRepository->syncServices($staff->id, $serviceIds);
+            $this->staffServiceRepository->syncServices($staff->id, $serviceIds);
 
-        return $staff;
+            return $staff;
+        });
     }
 }

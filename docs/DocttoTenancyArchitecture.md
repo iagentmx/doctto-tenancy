@@ -1,8 +1,66 @@
-## 1. Mapa de flujos
+# Doctto Tenancy Architecture
 
-### 1.1. Webhooks **de entrada** (EspoCRM → este servicio)
+## 1. Alcance funcional
 
-Rutas definidas en `routes/webhook.php` (montadas con prefijo `/webhook` desde `bootstrap/app.php`):
+El servicio `Doctto-Tenancy` centraliza:
+
+- Ingesta de eventos desde EspoCRM (`/webhook/espocrm/*`).
+- Persistencia del dominio tenant y sus entidades operativas.
+- Exposición de API interna para integraciones.
+- Emisión de eventos de integración hacia servicios externos.
+
+## 2. Módulos
+
+- `app/Modules/EspoCrmTenantIngestion`: adaptación de payloads de EspoCRM y orquestación de actualización local.
+- `app/Modules/TenantEntities`: casos de uso de dominio para tenant, locations, services, staff, schedules y relaciones.
+- `app/Modules/NotifierEvents`: registro, dispatch y entrega de eventos de integración con patrón Outbox.
+
+### 2.1 Eventos de integración por cambios operativos
+
+El módulo `NotifierEvents` registra eventos de integración cuando ocurre una actualización o eliminación en tablas operativas del dominio.
+
+Tablas operativas que disparan notificación:
+
+- `tenants`
+- `tenant_locations`
+- `services`
+- `staff`
+- `resources`
+- `schedules`
+- `tenant_admins`
+- `staff_services`
+
+Tablas excluidas por ser catálogo o clasificación:
+
+- `resource_types`
+- `service_categories`
+
+Reglas de ejecución:
+
+- El disparo sale desde observers Eloquent registrados en `AppServiceProvider`.
+- La publicación real la resuelve `IntegrationEventBusInterface` mediante `IntegrationEventBus`.
+- El pipeline central persiste primero el evento en `integration_event_outbox` y crea una fila por destino en `integration_event_deliveries`.
+- La entrega externa ocurre únicamente para eventos `updated` y `deleted`.
+- El payload canónico del evento usa el shape:
+  `{ "event": "service.updated", "tenant_id": 123, "entity_id": 10, "occurred_at": "2026-03-03T10:15:00Z", "metadata": { "changed_fields": ["name", "price"] } }`.
+- En eventos `deleted`, `metadata.changed_fields` se envía como arreglo vacío.
+- Los nombres de evento siguen el patrón `{entity}.{action}` para `tenant`, `tenant_location`, `service`, `staff`, `resource`, `schedule`, `tenant_admin` y `staff_service`.
+- Para `staff_services`, `entity_id` se deriva de la llave compuesta `(staff_id, service_id)` mediante un hash `crc32`, porque la tabla no tiene `id` propio.
+- `changed_fields` se construye desde los cambios detectados por Eloquent y excluye timestamps técnicos (`created_at`, `updated_at`, `deleted_at`).
+- Cada evento persistido recibe un `event_uuid` único para idempotencia externa.
+- No existe deduplicación en memoria por `event + tenant_id + entity_id`; updates legítimos consecutivos deben registrarse como eventos distintos.
+- La integridad por destino la garantiza el índice único `integration_event_outbox_id + destination` en `integration_event_deliveries`.
+- Cuando un flujo necesite disparar estos observers, los repositorios no deben usar `update()` o `delete()` masivos sobre esas entidades; deben operar por modelo Eloquent para que `updated` y `deleted` realmente se emitan.
+- El pipeline ya no depende de `EspoCrmWebhookRouteDetector` ni de rutas específicas de webhook; cualquier cambio persistido válido puede generar evento.
+- El transporte real a destinos externos se resuelve por publishers por destino; en la versión vigente solo existe `n8n` como destino habilitado.
+- La entrega inmediata se encola con jobs `afterCommit`; además existe barrido de rescate con el comando `notifier-events:dispatch-pending` programado cada minuto.
+- El reproceso manual de deliveries fallidas se realiza con `php artisan notifier-events:retry-deliveries`.
+- Las respuestas y errores de entrega se almacenan truncados a 8 KB por campo en `integration_event_deliveries`.
+- En flujos críticos con múltiples escrituras de negocio, la persistencia de dominio y la generación de eventos deben ejecutarse dentro de transacciones explícitas; por ejemplo, `UpsertTenantFromAccountUseCase` y `UpsertStaffUseCase`.
+
+### 2.2 Webhooks EspoCRM
+
+Rutas vigentes montadas bajo `/webhook`:
 
 - `POST /webhook/espocrm/account-updated`
 - `POST /webhook/espocrm/opportunity-updated`
@@ -11,300 +69,548 @@ Rutas definidas en `routes/webhook.php` (montadas con prefijo `/webhook` desde `
 - `POST /webhook/espocrm/staff-created`
 - `POST /webhook/espocrm/staff-updated`
 
-Todas apuntan a `EspoCrmWebhookController` y sus métodos `accountUpdated`, `opportunityUpdated`, `serviceCreated`, `serviceUpdated`, `staffCreated`, `staffUpdated`.
+Comportamiento vigente:
 
-Cada acción:
+- Las rutas se cargan desde `routes/webhook.php`.
+- El grupo de webhooks se monta desde `bootstrap/app.php`.
+- Actualmente usan middleware `api` y no el grupo `api-secure`.
+- `account-updated` sólo actualiza tenants ya existentes; si no existe un tenant con ese `espocrm_id`, el evento se ignora.
+- `opportunity-updated` sólo crea o actualiza tenant cuando `stage = 'Closed Won'`.
+- `service-updated` y `staff-updated` reconsultan el detalle completo en EspoCRM antes de persistir.
+- Cuando EspoCRM envía payload como arreglo con un único objeto (`[{...}]`), el controlador toma el primer elemento.
 
-- Usa un **FormRequest** específico (`EspoCrmUpdatedRequest`, `EspoCrmOpportunityUpdatedRequest`, `EspoCrmServiceCreatedRequest`, `EspoCrmStaffCreatedRequest`) que soporta tanto payload `{...}` como `[{...}]` (se detecta array y se usa prefijo `*.` en las reglas).
-- Normaliza el payload: si viene un array, toma el primer elemento.
-- Llama a `EspoCrmServiceInterface` (módulo `App\Modules\EspoCrmTenantIngestion`, implementado por `EspoCrmService`) para procesar el caso de uso: `handleAccountUpdated`, `handleOpportunityUpdated`, `handleServiceCreated`, `handleServiceUpdated`, `handleStaffCreated`, `handleStaffUpdated`.
-- Maneja errores diferenciando `EspoCrmWebhookException` (errores esperados de negocio / mapping) de errores inesperados, devolviendo JSON consistente.
+## 3. Capa de datos (global)
 
-En `EspoCrmService` (módulo `EspoCrmTenantIngestion`):
+Elementos globales fuera de módulos:
 
-- `handleAccountUpdated`:
-    - Valida `id`, busca tenant por `espocrm_id`; si no existe devuelve 200 con “evento ignorado”.
-    - Si existe, vuelve a leer el account desde EspoCRM y llama al use case `UpsertTenantFromAccountUseCase::executeUpdateExisting`.
-- `handleOpportunityUpdated`:
-    - Valida `id` y `stage`, ignora si `stage` ≠ `Closed Won`.
-    - Si sí es `Closed Won`, trae la opportunity, toma `accountId`, vuelve a leer el account y llama `UpsertTenantFromAccountUseCase::execute` para crear/actualizar tenant (incluyendo su **primary location**).
-- `handleServiceCreated/Updated`, `handleStaffCreated/Updated` usan repositorios y use cases (`UpsertServiceCategoryUseCase`, `UpsertServiceUseCase`, `UpsertStaffUseCase`) para mantener catálogo de servicios y staff vinculados al tenant.
+- Modelos Eloquent: `app/Models/*`
+- Repositorios: `app/Repositories/*` y `app/Repositories/Contracts/*`
+- Enums: `app/Enums/*`
+- Migraciones: `database/migrations/*`
 
-### 1.2. Notificación **hacia n8n** (este servicio → n8n)
+## 4. Modelo de datos Tenant
 
-#### Event bus de integración hacia n8n
+Tablas principales del dominio:
 
-- **Interface:** `IntegrationEventBusInterface` (`App\Modules\N8nNotifierEvents\Contracts`):
-    - `publishTenantUpdated(Tenant $tenant): void`.
-- **Implementación:** `N8nEventBus` (`App\Modules\N8nNotifierEvents\Services`):
-    - Recibe el `Tenant` y decide si realmente debe lanzar un evento hacia n8n.
-    - Solo actúa si `EspoCrmWebhookRouteDetector::shouldNotify()` devuelve `true`.
-    - Usa `N8nWebhookOnceGuard::shouldSend("tenant:{$jid}")` para no disparar más de una vez por request y por tenant JID.
-    - Si pasa ambas condiciones, construye un DTO `TenantUpdated` y lo pasa al handler `N8nTenantUpdatedHandler`.
+- `tenants`
+- `tenant_locations`
+- `resource_types`
+- `resources`
+- `service_categories`
+- `services`
+- `staff`
+- `schedules`
+- `staff_services`
+- `tenant_admins`
+- `integration_event_outbox`
+- `integration_event_deliveries`
 
-#### Handler y DTO `TenantUpdated`
+### 4.1 `tenants`
 
-- **DTO:** `TenantUpdated` (`App\Modules\N8nNotifierEvents\DTO`):
-    - Contiene el `tenantJid` como string, que es la clave que n8n necesita para consultar al API.
-- **Handler:** `N8nTenantUpdatedHandler` (`App\Modules\N8nNotifierEvents\Handlers`):
-    - Método principal: `handle(TenantUpdated $event): void`.
-    - Invoca al cliente HTTP (`N8nClientInterface`) para mandar el webhook a n8n con el payload `['tenant_jid' => $event->tenantJid]`.
+Propósito: representar la cuenta principal del negocio dentro de Doctto Tenancy.
 
-#### Cliente HTTP hacia n8n
+Campos:
 
-- **Interface:** `N8nClientInterface` (`App\Modules\N8nNotifierEvents\Contracts`):
-    - `postUpdateTenantWebhook(array $payload): void`.
-- **Implementación:** `HttpN8nClient` (`App\Modules\N8nNotifierEvents\Infrastructure\Http`):
-    - Usa `config('n8n.webhook.update_tenant')` y `config('n8n.api_key')`.
-    - Envía `tenant_jid` en el body, con header `x-api-key`.
-    - Maneja timeouts configurables y lanza `ApiServiceException` en caso de error HTTP o de conexión.
+- `id`
+- `jid` (identificador público único)
+- `name`
+- `is_active`
+- `espocrm_id` (identificador externo único, nullable)
+- `industry_type` (enum de aplicación `IndustryType`, nullable)
+- `operation_type` (enum de aplicación `OperationType`)
+- `description` (nullable)
+- `settings` (jsonb)
+- `created_at`, `updated_at`
 
-#### Detección de “de dónde viene” el request
+Constraints:
 
-- `EspoCrmWebhookRouteDetector::shouldNotify()` (`App\Modules\N8nNotifierEvents\Support`):
-    - Ignora si `app()->runningInConsole()`.
-    - Toma `request()->path()` y verifica `Str::endsWith` con las rutas:
-        - `espocrm/account-updated`
-        - `espocrm/opportunity-updated`
-        - `espocrm/service-created`
-        - `espocrm/service-updated`
-        - `espocrm/staff-created`
-        - `espocrm/staff-updated`
+- `unique(jid)`.
+- `unique(espocrm_id)`.
 
-    - Es decir, **solo las operaciones de creación/actualización** provenientes de EspoCRM pueden disparar la notificación hacia n8n.
+Implementación en código:
 
-- `N8nWebhookOnceGuard` (`App\Modules\N8nNotifierEvents\Support`):
-    - Mantiene un registro estático por request de las claves ya enviadas y evita duplicados (`tenant:{tenantJid}`, etc.).
+- Migración: `create_tenants_table`
+- Modelo: `App\Models\Tenant`
+- Repositorio: `App\Repositories\TenantRepository`
+- Contrato: `App\Repositories\Contracts\TenantRepositoryInterface`
+- Enums: `App\Enums\IndustryType`, `App\Enums\OperationType`
 
-#### Observers que disparan la notificación
+Reglas de dominio vigentes:
 
-En `AppServiceProvider::boot()` se registran observers para `Tenant`, `Service`, `Staff` y `TenantLocation`, todos inyectando `IntegrationEventBusInterface`:
+- `jid` es el identificador público que usan los endpoints `GET /api/v1/tenants/{tenantJid}`.
+- `espocrm_id` es la llave de correlación con EspoCRM.
+- `settings` se castea a arreglo en Eloquent.
+- En el catálogo interno, `settings` no se expone completo; se remapea a `assistant_name`, `url_review_platform` y `features`.
 
-- `TenantObserver::saved`:
-    - Toma `tenant->jid`; si existe, llama a `IntegrationEventBusInterface::publishTenantUpdated($tenant)`.
-- `ServiceObserver::saved`:
-    - Carga `tenant`, toma `tenant->jid` y llama a `publishTenantUpdated($service->tenant)`.
-- `StaffObserver::saved`:
-    - Igual que el de Service pero con `Staff`.
-- `TenantLocationObserver::saved`:
-    - Obtiene el tenant asociado a la ubicación y llama a `publishTenantUpdated($tenantLocation->tenant)`.
+### 4.2 `tenant_locations`
 
-En todos los casos, el EventBus aplica de nuevo la lógica de ruta (`EspoCrmWebhookRouteDetector`) y el guard de “una sola vez por request” antes de llegar al handler de n8n.
+Propósito: representar sedes o ubicaciones operativas de un tenant.
 
-### 1.3. API de consulta para n8n (n8n → este servicio)
+Campos:
 
-En `routes/api.php`:
+- `id`
+- `tenant_id` (FK a `tenants.id`)
+- `name`
+- `address` (nullable)
+- `time_zone` (nullable)
+- `url_map` (nullable)
+- `is_primary`
+- `is_active`
+- `settings` (jsonb)
+- `created_at`, `updated_at`
+
+Constraints:
+
+- `tenant_id` referencia a `tenants.id` con `cascadeOnDelete`.
+- `unique(tenant_id, name)`.
+- Índice único parcial `tenant_locations_one_primary_per_tenant_idx` para asegurar una sola ubicación primaria por tenant.
+
+Implementación en código:
+
+- Migración: `create_tenant_locations_table`
+- Modelo: `App\Models\TenantLocation`
+- Repositorio: `App\Repositories\TenantLocationRepository`
+- Contrato: `App\Repositories\Contracts\TenantLocationRepositoryInterface`
+
+Reglas de dominio vigentes:
+
+- La ubicación primaria se consulta con la relación `Tenant::primaryLocation()`.
+- Los flujos de ingesta desde EspoCRM crean o actualizan la ubicación primaria junto con el tenant dentro de la misma transacción.
+
+### 4.3 `resource_types`
+
+Propósito: catálogo global de tipos de recurso disponibles para `resources`.
+
+Campos:
+
+- `id`
+- `name` (string único)
+- `is_active`
+- `created_at`, `updated_at`
+
+Constraints:
+
+- `unique(name)`.
+
+Implementación en código:
+
+- Migración: `create_resource_types_table`
+- Modelo: `App\Models\ResourceType`
+- Repositorio: `App\Repositories\ResourceTypeRepository`
+- Contrato: `App\Repositories\Contracts\ResourceTypeRepositoryInterface`
+- Seeder: `Database\Seeders\ResourceTypeSeeder`
+
+### 4.4 `resources`
+
+Propósito: representar recursos físicos o lógicos que participan en las citas junto con el staff.
+
+Campos:
+
+- `id`
+- `tenant_id` (FK a `tenants.id`)
+- `tenant_location_id` (FK a `tenant_locations.id`)
+- `name`
+- `resource_type_id` (FK a `resource_types.id`)
+- `description` (nullable)
+- `is_active`
+- `settings` (jsonb)
+- `created_at`, `updated_at`
+
+Constraints:
+
+- `tenant_id` referencia a `tenants.id` con `cascadeOnDelete`.
+- `tenant_location_id` referencia a `tenant_locations.id` con `cascadeOnDelete`.
+- `resource_type_id` referencia a `resource_types.id` con `restrictOnDelete`.
+
+Implementación en código:
+
+- Migración: `create_resources_table`
+- Modelo: `App\Models\Resource`
+- Repositorio: `App\Repositories\ResourceRepository`
+- Contrato: `App\Repositories\Contracts\ResourceRepositoryInterface`
+
+Reglas de dominio vigentes:
+
+- Cada `resource` pertenece a un `tenant`, a una `tenant_location` y a un `resource_type`.
+- Los horarios de recurso se consultan vía relación polimórfica `morphMany` hacia `schedules`.
+
+### 4.5 `service_categories`
+
+Propósito: clasificar servicios por tenant.
+
+Campos:
+
+- `id`
+- `tenant_id` (FK a `tenants.id`)
+- `name`
+- `created_at`, `updated_at`
+
+Constraints:
+
+- `tenant_id` referencia a `tenants.id` con `cascadeOnDelete`.
+- `unique(tenant_id, name)`.
+
+Implementación en código:
+
+- Migración: `create_service_categories_table`
+- Modelo: `App\Models\ServiceCategory`
+- Repositorio: `App\Repositories\ServiceCategoryRepository`
+- Contrato: `App\Repositories\Contracts\ServiceCategoryRepositoryInterface`
+
+Reglas de dominio vigentes:
+
+- La categoría se upserta desde la ingesta de EspoCRM antes de persistir el servicio.
+- El catálogo `GET /api/v1/tenants/{tenantId}/catalog` expone la colección completa en `service_categories`.
+
+### 4.6 `services`
+
+Propósito: representar servicios ofertados por un tenant.
+
+Campos:
+
+- `id`
+- `tenant_id` (FK a `tenants.id`)
+- `espocrm_id` (nullable)
+- `name`
+- `description` (nullable)
+- `duration_minutes`
+- `price`
+- `category_id` (FK nullable a `service_categories.id`)
+- `is_active`
+- `settings` (jsonb)
+- `created_at`, `updated_at`
+
+Constraints:
+
+- `tenant_id` referencia a `tenants.id` con `cascadeOnDelete`.
+- `category_id` referencia a `service_categories.id` con `nullOnDelete`.
+- `unique(tenant_id, name)`.
+- `unique(tenant_id, espocrm_id)`.
+
+Implementación en código:
+
+- Migración: `create_services_table`
+- Modelo: `App\Models\Service`
+- Repositorio: `App\Repositories\ServiceRepository`
+- Contrato: `App\Repositories\Contracts\ServiceRepositoryInterface`
+
+Reglas de dominio vigentes:
+
+- `price` se castea como decimal con dos posiciones.
+- La relación con `staff` es many-to-many a través de `staff_services`.
+- `service-created` y `service-updated` terminan en el mismo flujo de upsert.
+
+### 4.7 `staff`
+
+Propósito: representar personal operativo del tenant.
+
+Campos:
+
+- `id`
+- `tenant_id` (FK a `tenants.id`)
+- `espocrm_id` (nullable)
+- `name`
+- `role` (enum de aplicación `StaffRole`)
+- `phone` (nullable)
+- `email` (nullable)
+- `is_active`
+- `settings` (jsonb)
+- `created_at`, `updated_at`
+
+Constraints:
+
+- `tenant_id` referencia a `tenants.id` con `cascadeOnDelete`.
+- `unique(tenant_id, espocrm_id)`.
+
+Implementación en código:
+
+- Migración: `create_staff_table`
+- Modelo: `App\Models\Staff`
+- Repositorio: `App\Repositories\StaffRepository`
+- Contrato: `App\Repositories\Contracts\StaffRepositoryInterface`
+- Enum: `App\Enums\StaffRole`
+
+Reglas de dominio vigentes:
+
+- `settings` se expone parcialmente en lecturas públicas y catálogo: sólo `about` y `specialty`.
+- La ingesta de staff resuelve dentro de una transacción: upsert de `staff`, reemplazo de schedules y sincronización de `staff_services`.
+- La sincronización de servicios usa los `servicesIds` de EspoCRM contra los servicios locales del mismo tenant.
+
+### 4.8 `schedules`
+
+Propósito: representar horarios de disponibilidad polimórficos para entidades agendables (`staff` y `resource`).
+
+Campos:
+
+- `id`
+- `tenant_id` (FK a `tenants.id`)
+- `schedulable_type` (string; enum de aplicación `SchedulableType`: `staff|resource`)
+- `schedulable_id`
+- `tenant_location_id` (FK a `tenant_locations.id`)
+- `day_of_week`
+- `start_time`
+- `end_time`
+- `is_active`
+- `created_at`, `updated_at`
+
+Constraints:
+
+- `tenant_id` referencia a `tenants.id` con `cascadeOnDelete`.
+- `tenant_location_id` referencia a `tenant_locations.id` con `cascadeOnDelete`.
+- `check(schedulable_type in ('staff','resource'))`.
+- Índice de consulta: `(tenant_id, schedulable_type, schedulable_id, day_of_week, start_time, end_time)`.
+- Unicidad: `(tenant_id, schedulable_type, schedulable_id, tenant_location_id, day_of_week, start_time, end_time)`.
+
+Implementación en código:
+
+- Migración: `replace_staff_schedules_with_schedules`
+- Modelo: `App\Models\Schedule`
+- Repositorio: `App\Repositories\ScheduleRepository`
+- Contrato: `App\Repositories\Contracts\ScheduleRepositoryInterface`
+- Enum: `App\Enums\SchedulableType`
+
+Reglas de dominio vigentes:
+
+- La tabla sustituyó a `staff_schedules` y migra datos existentes en la misma migración.
+- El catálogo interno devuelve una sola colección `schedules` combinando horarios de `staff` y `resource`.
+- La respuesta de catálogo agrega `day_name` derivado de `day_of_week`.
+
+### 4.9 `staff_services`
+
+Propósito: representar la relación many-to-many entre `staff` y `services`.
+
+Campos:
+
+- `staff_id` (FK a `staff.id`)
+- `service_id` (FK a `services.id`)
+
+Constraints:
+
+- PK compuesta `(staff_id, service_id)`.
+- `staff_id` referencia a `staff.id` con `cascadeOnDelete`.
+- `service_id` referencia a `services.id` con `cascadeOnDelete`.
+
+Implementación en código:
+
+- Migración: `create_staff_services_table`
+- Modelo pivot: `App\Models\StaffService`
+- Repositorio: `App\Repositories\StaffServiceRepository`
+- Contrato: `App\Repositories\Contracts\StaffServiceRepositoryInterface`
+
+Reglas de dominio vigentes:
+
+- La tabla no tiene `id`, timestamps ni payload adicional.
+- El alta y sincronización se realizan desde `UpsertStaffUseCase` por medio de `syncServices`.
+- Para eventos de integración, el `entity_id` se deriva de `(staff_id, service_id)` usando `crc32`.
+
+### 4.10 `tenant_admins`
+
+Propósito: representar administradores/backoffice/owner de un tenant, incluyendo el identificador del canal de autenticación.
+
+Campos:
+
+- `id`
+- `tenant_id` (FK a `tenants.id`)
+- `channel_type` (string; enum de aplicación `TenantAdminChannelType`)
+- `jid`
+- `role` (string; enum de aplicación `TenantAdminRole`)
+- `is_active`
+- `settings` (jsonb)
+- `created_at`, `updated_at`
+
+Constraints:
+
+- `tenant_id` referencia a `tenants.id` con `cascadeOnDelete`.
+- `unique(tenant_id, channel_type, jid)`.
+- Índice único parcial `tenant_admins_unique_owner_per_tenant` para `role = 'owner'`.
+
+Implementación en código:
+
+- Migración: `create_tenant_admins_table`
+- Modelo: `App\Models\TenantAdmin`
+- Repositorio: `App\Repositories\TenantAdminRepository`
+- Contrato: `App\Repositories\Contracts\TenantAdminRepositoryInterface`
+- Enums: `App\Enums\TenantAdminChannelType`, `App\Enums\TenantAdminRole`
+
+Reglas de dominio vigentes:
+
+- Debe existir como máximo un `tenant_admin` con `role = 'owner'` por `tenant_id`.
+- El alta de `tenant_admins` se resuelve desde `App\Modules\TenantEntities` mediante `registerTenantAdmin`.
+- El primer `tenant_admin` registrado para un tenant se persiste forzosamente con `role = 'owner'`, aunque el payload solicite `admin`.
+- Si el tenant ya tiene owner, cualquier intento de registrar otro `owner` falla con error de dominio `409`.
+- Mientras no exista un flujo explícito de transferencia, tampoco se permite degradar al owner vigente a `admin`.
+
+### 4.11 `integration_event_outbox`
+
+Propósito: persistir el evento canónico de integración generado por cambios del dominio antes de intentar cualquier transporte externo.
+
+Campos:
+
+- `id`
+- `event_uuid`
+- `event_name`
+- `tenant_id` (FK a `tenants.id`)
+- `entity_type`
+- `entity_id`
+- `payload` (jsonb)
+- `occurred_at`
+- `correlation_id` (nullable)
+- `source` (nullable)
+- `dispatched_at` (nullable)
+- `created_at`, `updated_at`
+
+Constraints:
+
+- `unique(event_uuid)`.
+- `tenant_id` referencia a `tenants.id` con `cascadeOnDelete`.
+- Índices por `(event_name, tenant_id)`, `(entity_type, entity_id)` y `occurred_at`.
+
+Implementación en código:
+
+- Migración: `create_integration_event_outbox_table`
+- Modelo: `App\Models\IntegrationEventOutbox`
+- Repositorio: `App\Repositories\IntegrationEventOutboxRepository`
+- Contrato: `App\Repositories\Contracts\IntegrationEventOutboxRepositoryInterface`
+
+Reglas de dominio vigentes:
+
+- `payload` se castea a arreglo en Eloquent.
+- `occurred_at` y `dispatched_at` se castean a datetime.
+- La relación `deliveries()` conecta con `integration_event_deliveries`.
+
+### 4.12 `integration_event_deliveries`
+
+Propósito: representar el estado de entrega del evento por destino externo.
+
+Campos:
+
+- `id`
+- `integration_event_outbox_id` (FK a `integration_event_outbox.id`)
+- `destination`
+- `status`
+- `attempts`
+- `next_retry_at`
+- `last_attempt_at`
+- `delivered_at`
+- `last_error`
+- `response_status_code`
+- `response_body`
+- `created_at`, `updated_at`
+
+Constraints:
+
+- `integration_event_outbox_id` referencia a `integration_event_outbox.id` con `cascadeOnDelete`.
+- Índices por `status`, `destination` y `next_retry_at`.
+- Índice único por `integration_event_outbox_id + destination`.
+
+Implementación en código:
+
+- Migración: `create_integration_event_deliveries_table`
+- Modelo: `App\Models\IntegrationEventDelivery`
+- Repositorio: `App\Repositories\IntegrationEventDeliveryRepository`
+- Contrato: `App\Repositories\Contracts\IntegrationEventDeliveryRepositoryInterface`
+- Enum: `App\Enums\IntegrationEventDeliveryStatus`
+
+Reglas de dominio vigentes:
+
+- `status` usa el enum `pending|processing|delivered|failed`.
+- `attempts` y `response_status_code` se castean a entero.
+- `next_retry_at`, `last_attempt_at` y `delivered_at` se castean a datetime.
+
+### 4.13 Convención de defaults JSON del dominio
+
+- Las columnas `settings` del dominio Tenant se mantienen como `jsonb` en PostgreSQL.
+- El valor por defecto en migraciones base debe declararse con el literal portable `'{}'`; no se permite usar casts crudos exclusivos de PostgreSQL como `::jsonb`.
+- Esta convención existe para mantener compatibilidad con los flujos locales y de pruebas que usan `sqlite` por defecto.
+
+### 4.14 Tabla legacy `staff_schedules`
+
+Estado vigente:
+
+- La tabla histórica `staff_schedules` fue reemplazada por `schedules` en la migración `replace_staff_schedules_with_schedules`.
+- La migración `create_staff_schedules_table` permanece como antecedente histórico del esquema.
+- En instalaciones nuevas, el esquema objetivo es `schedules`; `staff_schedules` no forma parte del modelo operativo vigente.
+
+## 5. Convenciones de repositorio
+
+Los repositorios deben seguir:
+
+- Métodos con patrón `Verbo + Entidad + By...`
+- Upsert únicamente como `updateOrCreate{Entity}`
+- Sin lógica HTTP en capa de repositorio
+- `TenantRepository::findTenantById()` debe cargar el catálogo agregado con relaciones `primaryLocation`, `tenantLocations`, `services.category`, `serviceCategories`, `staff.schedules.tenantLocation`, `staff.services`, `resources.resourceType`, `resources.schedules.tenantLocation` y `tenantAdmins`
+
+## 6. API de lectura tenant
+
+Endpoints vigentes de consulta:
 
 - `GET /api/v1/tenants/{tenantJid}`
-- `GET /api/v1/tenants/by-espocrm-id/{espocrmId}` con middleware `api-secure`.
+- `GET /api/v1/tenants/{tenantId}/catalog`
+- `GET /api/v1/tenants/by-espocrm-id/{espocrmId}`
 
-`TenantEntitiesService::getByJid` usa `TenantRepository::findTenantByJid` que eagerly carga:
+Reglas de acceso:
 
-- `services`, `staff`, `staff.schedules`, `staff.services`, `primaryLocation`.
+- Las rutas de lectura usan el grupo middleware `api-secure`.
+- La autenticación de estas rutas depende de `App\Http\Middleware\ValidateApiToken`.
 
-Esto se alinea con el uso típico desde n8n: recibir solo `tenant_jid` en el webhook y luego ir a `/api/v1/tenants/{tenantJid}` para obtener toda la estructura para el agente.
+### 6.1 Shape de `GET /api/v1/tenants/{tenantJid}`
 
----
+La respuesta exitosa del controlador usa el envelope:
 
-## 2. Riesgos y consideraciones técnicas detectadas
+- `status`: `success`
+- `data`: objeto del tenant
 
-### 2.1. Notificación a n8n dentro de transacción (riesgo, no bug)
+El objeto `data` expone identificadores separados:
 
-En `UpsertTenantFromAccountUseCase` se usa `DB::transaction` para upsertear Tenant y primary location:
+- `id`: identificador interno del registro `tenants.id`
+- `espocrm_id`: identificador externo del tenant en EspoCRM
+- `jid`: identificador público usado en la ruta
 
-- Los observers (`saved`) se disparan **dentro** de esa transacción.
-- Esos observers llaman al `IntegrationEventBusInterface::publishTenantUpdated($tenant)`, que eventualmente puede disparar el webhook hacia n8n.
+Reglas de contrato:
 
-Riesgo:
+- `id` nunca debe reutilizar el valor de `espocrm_id`.
+- `espocrm_id` siempre debe enviarse en un campo independiente cuando exista.
+- `address`, `time_zone` y `url_map` salen de `primaryLocation`.
+- La colección `staff` sólo expone `name`, `phone`, `email`, `settings`, `schedules` y `services`.
 
-- Si algo revierte la transacción después de publicar el evento (por cualquier cambio futuro en la lógica), n8n habrá recibido un webhook de un cambio que realmente nunca se confirmó en BD.
+### 6.2 Shape de `GET /api/v1/tenants/{tenantId}/catalog`
 
-Hoy no parece que se estén haciendo rollbacks manuales complejos, así que **no es un bug práctico**, pero:
+Endpoint interno de lectura agregada por identificador interno del tenant.
 
-- Si en el futuro se amplía la lógica dentro de esa transacción, podría valer la pena mover la notificación a un hook “after commit” o a un job en cola para evitar inconsistencias temporales entre n8n y la BD.
+La respuesta exitosa del controlador usa el envelope:
 
-### 2.2. Seguridad de los webhooks de EspoCRM
+- `status`: `success`
+- `data`: objeto con el catálogo completo
 
-- Los endpoints `/webhook/espocrm/*` definidos en `routes/webhook.php` **no tienen middleware explícito** (tipo `api-secure` o firma).
-- Los endpoints de API para n8n (`/tenants/*`) sí van con middleware `api-secure`.
+El objeto `data` expone:
 
-Esto no rompe nada funcionalmente, pero a nivel de “auditoría”:
+- `tenant`: datos base del tenant
+- `locations`: colección de `tenant_locations`
+- `staff`: colección de `staff`
+- `services`: colección de `services`
+- `service_categories`: colección de `service_categories`
+- `tenant_admins`: colección de `tenant_admins`
+- `resources`: colección de `resources`
+- `schedules`: colección agregada de horarios de `staff` y `resource`
 
-- Si el servicio está expuesto públicamente, cualquier tercero podría pegar a esas URLs y tratar de simular eventos de EspoCRM.
-- Lo normal sería:
-    - Restringir por IP (nivel Nginx o LB) **y/o**
-    - Añadir un header firmado / token compartido entre Espo y este servicio.
+Reglas de contrato:
 
----
+- La ruta usa `tenantId` interno del registro `tenants.id`.
+- `tenant.settings` sólo expone datos útiles de consumo y excluye secretos de integración; actualmente incluye `assistant_name`, `url_review_platform` y `features`.
+- `staff.settings` expone únicamente `about` y `specialty`.
+- `schedules` se entrega como colección plana con `schedulable_type`, `schedulable_id`, `tenant_location_id`, `day_of_week`, `day_name`, `start_time`, `end_time` e `is_active`.
+- `resources[*].resource_type` se expone embebido con `id` y `name`.
 
-## 3. Tablas y modelo de dominio
+### 6.3 Shape de `GET /api/v1/tenants/by-espocrm-id/{espocrmId}`
 
-### 3.1. Tablas principales
+La respuesta exitosa vigente no usa el mismo envelope que los otros dos endpoints. Actualmente devuelve:
 
-- **`tenants`**
-    - Campos clave: `id`, `jid` (string, único), `name`, `is_active`, `espocrm_id` (único y con índice), `industry_type`, `operation_type`, `description`, `settings` (JSONB), timestamps.
-    - `jid` es el identificador estable que usa n8n; `espocrm_id` enlaza con EspoCRM.
-    - `operation_type` se castea a `OperationType` y `industry_type` a `IndustryType`.
+- `status`: `success`
+- `message`: `Tenant found successfully.`
+- `result`: `tenant->toArray()`
 
-- **`tenant_locations`**
-    - Campos clave: `id`, `tenant_id` (FK a `tenants`), `name`, `address`, `time_zone`, `url_map`, `is_primary`, `is_active`, `settings` (JSONB), timestamps.
-    - Restricciones típicas:
-        - `unique(['tenant_id', 'name'])`.
-        - Índice único parcial para garantizar **solo una ubicación primaria** por tenant (`WHERE is_primary = true`).
+Reglas de contrato:
 
-- **`service_categories`**
-    - Campos: `id`, `tenant_id` (FK a `tenants`), `name`, timestamps.
-    - Restricción: `unique(['tenant_id', 'name'])`.
-
-- **`services`**
-    - Campos clave: `id`, `tenant_id` (FK), `espocrm_id`, `name`, `description`, `duration_minutes`, `price`, `category_id` (FK a `service_categories`, `nullOnDelete`), `is_active`, `settings` (JSONB), timestamps.
-    - Restricciones:
-        - `unique(['tenant_id', 'name'])`.
-        - `unique(['tenant_id', 'espocrm_id'])`.
-    - Casts: `price` a `decimal:2`, `is_active` boolean, `settings` array.
-
-- **`staff`**
-    - Campos clave: `id`, `tenant_id` (FK), `espocrm_id`, `name`, `role`, `phone`, `email`, `is_active`, `settings` (JSONB), timestamps.
-    - Restricción: `unique(['tenant_id', 'espocrm_id'])`.
-    - Casts: `role` a `StaffRole`, `is_active` boolean, `settings` array.
-
-- **`staff_schedules`**
-    - Campos clave: `id`, `staff_id` (FK a `staff`), `tenant_location_id` (FK a `tenant_locations`), `day_of_week` (`1=Lun` … `7=Dom`), `start_time`, `end_time`, `is_active`, timestamps.
-    - Restricción: `unique(['staff_id', 'tenant_location_id', 'day_of_week', 'start_time', 'end_time'])`.
-
-- **`staff_services`** (tabla pivote)
-    - Campos: `staff_id` (FK a `staff`), `service_id` (FK a `services`).
-    - PK compuesta: `primary(['staff_id', 'service_id'])`.
-
-### 3.2. Relaciones de dominio
-
-- **Tenant**
-    - `hasMany(Service::class)` → `services`.
-    - `hasMany(ServiceCategory::class)` → `serviceCategories`.
-    - `hasMany(Staff::class)` → `staff`.
-    - `hasMany(TenantLocation::class)` → `tenantLocations`.
-    - `hasOne(TenantLocation::class)->where('is_primary', true)` → `primaryLocation`.
-
-- **TenantLocation**
-    - `belongsTo(Tenant::class)` → `tenant`.
-
-- **ServiceCategory**
-    - `belongsTo(Tenant::class)` → `tenant`.
-    - `hasMany(Service::class)` → `services`.
-
-- **Service**
-    - `belongsTo(Tenant::class)` → `tenant`.
-    - `belongsTo(ServiceCategory::class)` → `category`.
-    - `belongsToMany(Staff::class, 'staff_services')` → `staff`.
-
-- **Staff**
-    - `belongsTo(Tenant::class)` → `tenant`.
-    - `belongsToMany(Service::class, 'staff_services')` → `services`.
-    - `hasMany(StaffSchedule::class)` → `schedules`.
-
-- **StaffSchedule**
-    - `belongsTo(Staff::class)` → `staff`.
-    - `belongsTo(TenantLocation::class)` → `tenantLocation`.
-
-### 3.3. Enums de dominio
-
-- **`IndustryType`** (`App\Enums\IndustryType`)
-    - `Healthcare`, `Other`.
-- **`OperationType`** (`App\Enums\OperationType`)
-    - `single_staff`, `multi_staff`, `multi_resource`, `multi_location`.
-    - Se usa en `tenants.operation_type` para describir el modelo operativo del negocio.
-- **`StaffRole`** (`App\Enums\StaffRole`)
-    - `doctor`, `stylist`, `therapist`, `mechanic`, `consultant`.
-    - Se usa en `staff.role` para especializar al staff.
-
-### 3.4. Campos JSONB y extensiones
-
-- **Campos `settings`**:
-    - `tenants.settings`, `tenant_locations.settings`, `services.settings`, `staff.settings` son JSONB, casteados a `array` en Eloquent para configuración flexible por tenant/ubicación/servicio/staff.
-- **Extensiones e índices Postgres** (según migración de extensiones):
-    - `CREATE EXTENSION IF NOT EXISTS pgcrypto` (para futuros UUIDs).
-    - `CREATE EXTENSION IF NOT EXISTS unaccent`.
-    - `CREATE EXTENSION IF NOT EXISTS pg_trgm`.
-    - Función SQL `immutable_unaccent(text)` para permitir estrategias de indexación/búsqueda acento-insensible.
-    - Índices GIN típicos:
-        - `idx_tenants_settings_gin` en `tenants(settings)`.
-        - `idx_services_settings_gin` en `services(settings)`.
-        - `idx_staff_settings_gin` en `staff(settings)`.
-
----
-
-## 4. Contratos externos (APIs)
-
-### 4.1. Cliente HTTP hacia EspoCRM
-
-**Interface:** `EspoCrmClientInterface` (`App\Modules\EspoCrmTenantIngestion\Contracts`):
-
-- `getAccountById(string $id): array`
-- `getOpportunityById(string $id): array`
-- `getServiceById(string $id): array`
-- `getStaffById(string $id): array`
-
-**Implementación:** `HttpEspoCrmClient` (`App\Modules\EspoCrmTenantIngestion\Infrastructure\Http`):
-
-- Configuración vía `EspoCrmConfigProviderInterface` (`espocrm.base_url`, `espocrm.username`, `espocrm.password`, `espocrm.timeout_seconds`).
-- Autenticación: **Basic Auth**.
-- Endpoints REST consumidos:
-    - `GET /api/v1/Account/{id}`
-    - `GET /api/v1/Opportunity/{id}`
-    - `GET /api/v1/CService/{id}`
-    - `GET /api/v1/CStaff/{id}`
-- Headers:
-    - `Accept: application/json`
-    - `Content-Type: application/json`
-- Manejo de errores:
-    - Lanza `ApiServiceException` si el `id` es inválido, hay error de conexión o EspoCRM responde con error.
-    - Intenta extraer mensaje de error de `message` o `error` en el JSON.
-
-### 4.2. Cliente HTTP hacia n8n
-
-**Interface:** `N8nClientInterface` (`App\Modules\N8nNotifierEvents\Contracts`):
-
-- `postUpdateTenantWebhook(array $payload): void`.
-
-**Implementación:** `HttpN8nClient` (`App\Modules\N8nNotifierEvents\Infrastructure\Http`):
-
-- Configuración:
-    - URL desde `config('n8n.webhook.update_tenant')`.
-    - API key desde `config('n8n.api_key')`.
-- Request:
-    - Método: `POST`.
-    - Body típico: `['tenant_jid' => '...']`.
-    - Header: `x-api-key: {api_key}`.
-    - Timeouts basados en `config('n8n.connect_timeout')` y `config('n8n.timeout')`.
-- Errores:
-    - `ApiServiceException` si la URL o API key no están configuradas, si hay fallo de conexión o si la respuesta no es `2xx`.
-    - Logging detallado (`status`, `body`, `payload`) cuando n8n responde error.
-
-### 4.3. API propia expuesta a n8n
-
-- Endpoints:
-    - `GET /api/v1/tenants/{tenantJid}` → devuelve un `Tenant` con `services`, `staff`, `staff.schedules`, `staff.services`, `primaryLocation`.
-    - `GET /api/v1/tenants/by-espocrm-id/{espocrmId}` → búsqueda por `espocrm_id`.
-- Seguridad:
-    - Protegidos con middleware `api-secure` (`ValidateApiToken`).
-    - Requiere header `X-Api-Token` con el mismo valor de `APP_API_TOKEN`.
-
----
-
-## 5. Reglas transversales y manejo de errores
-
-- **Observers + EventBus hacia n8n**
-    - `TenantObserver`, `ServiceObserver`, `StaffObserver`, `TenantLocationObserver` centralizan la publicación de eventos de tipo “tenant actualizado” al `IntegrationEventBusInterface` cada vez que se persiste algo relevante del tenant.
-    - El `N8nEventBus` solo reenvía al handler de n8n si:
-        - La petición actual proviene de alguna ruta `/espocrm/...` (`EspoCrmWebhookRouteDetector::shouldNotify()`).
-        - `N8nWebhookOnceGuard::shouldSend("tenant:{jid}")` devuelve `true` (garantiza **máximo un webhook por tenant y request**).
-
-- **Detección de origen de request**
-    - `EspoCrmWebhookRouteDetector`:
-        - Ignora ejecución en consola.
-        - Usa `request()->path()` + `Str::endsWith` para detectar si el flujo viene de un webhook de EspoCRM.
-
-- **Errores y logging**
-    - Errores de integración externa (`EspoCRM`, `n8n`) se encapsulan en `ApiServiceException`.
-    - Errores de negocio / mapping en los webhooks se encapsulan en `EspoCrmWebhookException` y se devuelven al cliente con status controlado.
-    - Errores inesperados se loguean con `message`, `trace` y contexto (ids relevantes) y se responde con HTTP 500.
+- La ruta busca por `tenants.espocrm_id`.
+- La respuesta actual expone el modelo crudo serializado y no la versión remapeada de catálogo.
+- Si este endpoint cambia de envelope en el futuro, este documento debe actualizarse para reflejar el contrato real.

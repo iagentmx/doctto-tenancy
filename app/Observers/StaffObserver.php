@@ -2,24 +2,25 @@
 
 namespace App\Observers;
 
-use App\Modules\N8nNotifierEvents\Contracts\IntegrationEventBusInterface;
+use App\Modules\NotifierEvents\Contracts\IntegrationEventBusInterface;
 use App\Models\Staff;
+use App\Observers\Concerns\NotifiesTenantUpdated;
 
 class StaffObserver
 {
+    use NotifiesTenantUpdated;
+
     public function __construct(
         protected IntegrationEventBusInterface $integrationEventBus
     ) {}
 
-    public function saved(Staff $staff): void
+    public function updated(Staff $staff): void
     {
-        $staff->loadMissing('tenant');
+        $this->publishUpdatedEvent($staff, 'staff');
+    }
 
-        $jid = $staff->tenant?->jid ?? null;
-        if (!is_string($jid) || trim($jid) === '') {
-            return;
-        }
-
-        $this->integrationEventBus->publishTenantUpdated($staff->tenant);
+    public function deleted(Staff $staff): void
+    {
+        $this->publishDeletedEvent($staff, 'staff');
     }
 }

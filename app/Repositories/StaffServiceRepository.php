@@ -9,7 +9,11 @@ class StaffServiceRepository implements StaffServiceRepositoryInterface
 {
     public function syncServices(int $staffId, array $serviceIds): void
     {
-        StaffService::where('staff_id', $staffId)->delete();
+        StaffService::query()
+            ->where('staff_id', $staffId)
+            ->get()
+            ->each
+            ->delete();
 
         foreach ($serviceIds as $serviceId) {
             StaffService::create([

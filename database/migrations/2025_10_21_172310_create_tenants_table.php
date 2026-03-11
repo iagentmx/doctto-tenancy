@@ -4,7 +4,6 @@ use App\Enums\OperationType;
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
-use Illuminate\Support\Facades\DB;
 
 return new class extends Migration
 {
@@ -19,7 +18,7 @@ return new class extends Migration
             $table->string('industry_type', 32)->nullable();
             $table->string('operation_type', 32)->default(OperationType::SingleStaff->value);
             $table->text('description')->nullable();
-            $table->jsonb('settings')->default(DB::raw("'{}'::jsonb"));
+            $table->jsonb('settings')->default('{}');
             $table->timestampsTz();
         });
     }

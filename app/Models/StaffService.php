@@ -14,4 +14,14 @@ class StaffService extends Pivot
     ];
 
     public $timestamps = false;
+
+    public function staff()
+    {
+        return $this->belongsTo(Staff::class);
+    }
+
+    public function service()
+    {
+        return $this->belongsTo(Service::class);
+    }
 }

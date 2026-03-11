@@ -2,24 +2,25 @@
 
 namespace App\Observers;
 
-use App\Modules\N8nNotifierEvents\Contracts\IntegrationEventBusInterface;
+use App\Modules\NotifierEvents\Contracts\IntegrationEventBusInterface;
 use App\Models\TenantLocation;
+use App\Observers\Concerns\NotifiesTenantUpdated;
 
 class TenantLocationObserver
 {
+    use NotifiesTenantUpdated;
+
     public function __construct(
         protected IntegrationEventBusInterface $integrationEventBus
     ) {}
 
-    public function saved(TenantLocation $tenantLocation): void
+    public function updated(TenantLocation $tenantLocation): void
     {
-        $tenantLocation->loadMissing('tenant');
+        $this->publishUpdatedEvent($tenantLocation, 'tenant_location');
+    }
 
-        $jid = $tenantLocation->tenant?->jid ?? null;
-        if (!is_string($jid) || trim($jid) === '') {
-            return;
-        }
-
-        $this->integrationEventBus->publishTenantUpdated($tenantLocation->tenant);
+    public function deleted(TenantLocation $tenantLocation): void
+    {
+        $this->publishDeletedEvent($tenantLocation, 'tenant_location');
     }
 }

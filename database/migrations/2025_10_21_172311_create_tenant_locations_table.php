@@ -18,7 +18,7 @@ return new class extends Migration
             $table->text('url_map')->nullable();
             $table->boolean('is_primary')->default(false);
             $table->boolean('is_active')->default(true);
-            $table->jsonb('settings')->default(DB::raw("'{}'::jsonb"));
+            $table->jsonb('settings')->default('{}');
             $table->timestampsTz();
 
             $table->unique(['tenant_id', 'name']);

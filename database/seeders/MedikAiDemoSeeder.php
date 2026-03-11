@@ -4,10 +4,11 @@ namespace Database\Seeders;
 
 use App\Enums\IndustryType;
 use App\Enums\OperationType;
+use App\Enums\SchedulableType;
+use App\Models\Schedule;
 use App\Models\Service;
 use App\Models\ServiceCategory;
 use App\Models\Staff;
-use App\Models\StaffSchedule;
 use App\Models\Tenant;
 use App\Models\TenantLocation;
 use Illuminate\Database\Seeder;
@@ -129,9 +130,13 @@ class MedikAiDemoSeeder extends Seeder
             );
 
             // ---------------------------
-            // STAFF SCHEDULES
+            // SCHEDULES (staff)
             // ---------------------------
-            StaffSchedule::where('staff_id', $staff->id)->delete();
+            Schedule::query()
+                ->where('tenant_id', $tenant->id)
+                ->where('schedulable_type', SchedulableType::Staff->value)
+                ->where('schedulable_id', $staff->id)
+                ->delete();
 
             $schedules = [
                 ['day_of_week' => 1, 'start_time' => '09:00:00', 'end_time' => '18:00:00'],
@@ -143,8 +148,10 @@ class MedikAiDemoSeeder extends Seeder
             ];
 
             foreach ($schedules as $s) {
-                StaffSchedule::create([
-                    'staff_id'    => $staff->id,
+                Schedule::create([
+                    'tenant_id' => $tenant->id,
+                    'schedulable_type' => SchedulableType::Staff->value,
+                    'schedulable_id' => $staff->id,
                     'tenant_location_id' => $tenantLocation->id,
                     'day_of_week' => $s['day_of_week'],
                     'start_time'  => $s['start_time'],

@@ -7,6 +7,7 @@ use App\Models\Tenant;
 interface TenantRepositoryInterface
 {
     public function findTenantByJid(string $jid): ?Tenant; //
+    public function findTenantById(int $tenantId): ?Tenant;
     public function findTenantByEspoCrmId(string $espocrmId): ?Tenant; //
     public function updateOrCreateTenant(array $uniqueKeys, array $data): Tenant; //
     public function updateTenant(int $tenantId, array $data): Tenant;

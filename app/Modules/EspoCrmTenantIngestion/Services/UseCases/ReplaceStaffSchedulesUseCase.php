@@ -3,23 +3,23 @@
 namespace App\Modules\EspoCrmTenantIngestion\Services\UseCases;
 
 use App\Modules\EspoCrmTenantIngestion\Infrastructure\Mapping\StaffSchedulesMapper;
-use App\Repositories\Contracts\StaffScheduleRepositoryInterface;
+use App\Repositories\Contracts\ScheduleRepositoryInterface;
 
 final class ReplaceStaffSchedulesUseCase
 {
     public function __construct(
-        protected StaffScheduleRepositoryInterface $staffScheduleRepository
+        protected ScheduleRepositoryInterface $scheduleRepository
     ) {}
 
-    public function execute(int $staffId, int $tenantLocationId, array $payload): void
+    public function execute(int $tenantId, int $staffId, int $tenantLocationId, array $payload): void
     {
         // Igual que antes: borrar todo y recrear
-        $this->staffScheduleRepository->deleteStaffScheduleByStaff($staffId);
+        $this->scheduleRepository->deleteScheduleByStaff($staffId);
 
-        $rows = StaffSchedulesMapper::map($staffId, $tenantLocationId, $payload);
+        $rows = StaffSchedulesMapper::map($tenantId, $staffId, $tenantLocationId, $payload);
 
         foreach ($rows as $row) {
-            $this->staffScheduleRepository->createStaffSchedule($row);
+            $this->scheduleRepository->createSchedule($row);
         }
     }
 }

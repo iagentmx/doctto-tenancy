@@ -2,24 +2,25 @@
 
 namespace App\Observers;
 
-use App\Modules\N8nNotifierEvents\Contracts\IntegrationEventBusInterface;
+use App\Modules\NotifierEvents\Contracts\IntegrationEventBusInterface;
 use App\Models\Service;
+use App\Observers\Concerns\NotifiesTenantUpdated;
 
 class ServiceObserver
 {
+    use NotifiesTenantUpdated;
+
     public function __construct(
         protected IntegrationEventBusInterface $integrationEventBus
     ) {}
 
-    public function saved(Service $service): void
+    public function updated(Service $service): void
     {
-        $service->loadMissing('tenant');
+        $this->publishUpdatedEvent($service, 'service');
+    }
 
-        $jid = $service->tenant?->jid ?? null;
-        if (!is_string($jid) || trim($jid) === '') {
-            return;
-        }
-
-        $this->integrationEventBus->publishTenantUpdated($service->tenant);
+    public function deleted(Service $service): void
+    {
+        $this->publishDeletedEvent($service, 'service');
     }
 }

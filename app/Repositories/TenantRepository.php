@@ -7,6 +7,21 @@ use App\Repositories\Contracts\TenantRepositoryInterface;
 
 class TenantRepository implements TenantRepositoryInterface
 {
+    private function catalogRelations(): array
+    {
+        return [
+            'primaryLocation',
+            'tenantLocations',
+            'services.category',
+            'serviceCategories',
+            'staff.schedules.tenantLocation',
+            'staff.services',
+            'resources.resourceType',
+            'resources.schedules.tenantLocation',
+            'tenantAdmins',
+        ];
+    }
+
     public function findTenantByJid(string $jid): ?Tenant
     {
         return Tenant::query()->with([
@@ -17,6 +32,14 @@ class TenantRepository implements TenantRepositoryInterface
             'primaryLocation',
         ])
             ->where('jid', $jid)
+            ->first();
+    }
+
+    public function findTenantById(int $tenantId): ?Tenant
+    {
+        return Tenant::query()
+            ->with($this->catalogRelations())
+            ->where('id', $tenantId)
             ->first();
     }
 

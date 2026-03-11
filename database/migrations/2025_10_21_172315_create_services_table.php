@@ -3,7 +3,6 @@
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
-use Illuminate\Support\Facades\DB;
 
 return new class extends Migration
 {
@@ -19,7 +18,7 @@ return new class extends Migration
             $table->decimal('price', 12, 2)->default(0);
             $table->foreignId('category_id')->nullable()->constrained('service_categories')->nullOnDelete();
             $table->boolean('is_active')->default(true);
-            $table->jsonb('settings')->default(DB::raw("'{}'::jsonb"));
+            $table->jsonb('settings')->default('{}');
             $table->timestampsTz();
 
             $table->unique(['tenant_id', 'name']);

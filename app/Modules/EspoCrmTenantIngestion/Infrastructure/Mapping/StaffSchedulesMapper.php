@@ -2,15 +2,16 @@
 
 namespace App\Modules\EspoCrmTenantIngestion\Infrastructure\Mapping;
 
+use App\Enums\SchedulableType;
 use App\Exceptions\EspoCrmWebhookException;
 
 final class StaffSchedulesMapper
 {
     /**
      * Mantiene exactamente el mismo día->número y llaves del payload.
-     * Devuelve una lista de rows listas para createStaffSchedule().
+     * Devuelve una lista de rows listas para createSchedule().
      */
-    public static function map(int $staffId, int $tenantLocationId, array $payload): array
+    public static function map(int $tenantId, int $staffId, int $tenantLocationId, array $payload): array
     {
         $rows = [];
 
@@ -36,7 +37,9 @@ final class StaffSchedulesMapper
                 }
 
                 $rows[] = [
-                    'staff_id' => $staffId,
+                    'tenant_id' => $tenantId,
+                    'schedulable_type' => SchedulableType::Staff->value,
+                    'schedulable_id' => $staffId,
                     'tenant_location_id' => $tenantLocationId,
                     'day_of_week' => $dayNumber,
                     'start_time' => $startTime,

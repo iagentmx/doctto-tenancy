@@ -2,22 +2,25 @@
 
 namespace App\Observers;
 
-use App\Modules\N8nNotifierEvents\Contracts\IntegrationEventBusInterface;
+use App\Modules\NotifierEvents\Contracts\IntegrationEventBusInterface;
 use App\Models\Tenant;
+use App\Observers\Concerns\NotifiesTenantUpdated;
 
 class TenantObserver
 {
+    use NotifiesTenantUpdated;
+
     public function __construct(
         protected IntegrationEventBusInterface $integrationEventBus
     ) {}
 
-    public function saved(Tenant $tenant): void
+    public function updated(Tenant $tenant): void
     {
-        $jid = $tenant->jid ?? null;
-        if (!is_string($jid) || trim($jid) === '') {
-            return;
-        }
+        $this->publishUpdatedEvent($tenant, 'tenant', (int) $tenant->getKey());
+    }
 
-        $this->integrationEventBus->publishTenantUpdated($tenant);
+    public function deleted(Tenant $tenant): void
+    {
+        $this->publishDeletedEvent($tenant, 'tenant', (int) $tenant->getKey());
     }
 }

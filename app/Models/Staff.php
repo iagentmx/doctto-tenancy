@@ -40,6 +40,6 @@ class Staff extends Model
 
     public function schedules()
     {
-        return $this->hasMany(StaffSchedule::class);
+        return $this->morphMany(Schedule::class, 'schedulable');
     }
 }
