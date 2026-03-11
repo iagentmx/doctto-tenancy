@@ -10,7 +10,7 @@ return [
     ],
     'destinations' => [
         'n8n' => [
-            'enabled' => (bool) env('NOTIFIER_EVENTS_N8N_ENABLED', true),
+            'enabled' => filter_var(env('NOTIFIER_EVENTS_N8N_ENABLED', true), FILTER_VALIDATE_BOOL, FILTER_NULL_ON_FAILURE) ?? true,
             'webhook_url' => $n8nBase . 'update/tenant',
             'api_key' => (string) env('N8N_API_KEY'),
             'connect_timeout' => (int) env('N8N_CONNECT_TIMEOUT', 5),

@@ -2,24 +2,32 @@
 
 namespace App\Repositories;
 
-use App\Models\StaffService;
 use App\Repositories\Contracts\StaffServiceRepositoryInterface;
+use Illuminate\Support\Facades\DB;
 
 class StaffServiceRepository implements StaffServiceRepositoryInterface
 {
     public function syncServices(int $staffId, array $serviceIds): void
     {
-        StaffService::query()
+        $normalizedServiceIds = array_values(array_unique(array_map(
+            static fn ($serviceId): int => (int) $serviceId,
+            array_filter($serviceIds, static fn ($serviceId): bool => is_numeric($serviceId))
+        )));
+
+        DB::table('staff_services')
             ->where('staff_id', $staffId)
-            ->get()
-            ->each
             ->delete();
 
-        foreach ($serviceIds as $serviceId) {
-            StaffService::create([
-                'staff_id'   => $staffId,
-                'service_id' => $serviceId,
-            ]);
+        if ($normalizedServiceIds === []) {
+            return;
         }
+
+        DB::table('staff_services')->insert(array_map(
+            static fn (int $serviceId): array => [
+                'staff_id' => $staffId,
+                'service_id' => $serviceId,
+            ],
+            $normalizedServiceIds
+        ));
     }
 }
