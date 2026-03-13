@@ -2,22 +2,30 @@
 
 ## 1. Objetivo
 
-Establecer reglas claras para que cualquier refactor o nueva funcionalidad relacionada con:
+Establecer el alcance real del dominio `TenantEntities` y las reglas para mantener consistente la documentación y el código relacionado con las tablas tenant vigentes.
 
+Este dominio abarca actualmente:
+
+- `tenants`
 - `tenant_locations`
+- `resource_types`
+- `resources`
+- `service_categories`
 - `services`
 - `staff`
-- `staff_schedules`
+- `schedules`
 - `staff_services`
-- y consulta de `tenants` (solo lectura)
+- `tenant_admins`
+- `integration_event_outbox`
+- `integration_event_deliveries`
 
-respete la arquitectura de módulos aprobada para `TenantEntities`.
+`staff_schedules` ya no forma parte del modelo vigente. Fue reemplazada por `schedules` con relación polimórfica para `staff` y `resources`.
 
 ---
 
-## 2. Estructura de carpetas
+## 2. Estructura real del módulo
 
-La estructura de `app/Modules/TenantEntities`:
+La estructura actual de `app/Modules/TenantEntities` es:
 
 ```text
 app/Modules/TenantEntities/
@@ -25,46 +33,18 @@ app/Modules/TenantEntities/
     TenantEntitiesServiceInterface.php
 
   DTO/
-    TenantLocationData.php
-    ServiceData.php
     StaffData.php
-    StaffScheduleData.php
-    StaffServiceData.php
+    TenantAdminData.php
 
   UseCases/
-    TenantLocations/
-      CreateTenantLocation.php
-      UpdateTenantLocation.php
-      DeleteTenantLocation.php
-      ListTenantLocations.php
-
-    Services/
-      CreateService.php
-      UpdateService.php
-      DeleteService.php
-      ListServices.php
-
     Staff/
       CreateStaff.php
-      UpdateStaff.php
       DeleteStaff.php
+      GetStaff.php
       ListStaff.php
-
-    StaffSchedules/
-      CreateStaffSchedule.php
-      UpdateStaffSchedule.php
-      DeleteStaffSchedule.php
-      ListStaffSchedules.php
-
-    StaffServices/
-      AssignStaffService.php
-      UpdateStaffService.php
-      RemoveStaffServices.php
-      ListStaffServices.php
-
-    Tenants/
-      GetTenant.php
-      GetTenantWithEntities.php
+      UpdateStaff.php
+    TenantAdmins/
+      RegisterTenantAdmin.php
 
   Services/
     TenantEntitiesService.php
@@ -73,142 +53,184 @@ app/Modules/TenantEntities/
     TenantEntitiesServiceProvider.php
 ```
 
----
+Regla:
 
-## 3. Qué sí va dentro del módulo
-
-### 3.1. Contracts
-
-- Interfaces públicas del módulo:
-    - `TenantEntitiesServiceInterface`
-
-- Es el **único contrato** que deben usar controladores, jobs, listeners, webhooks, n8n, etc., cuando hablen de:
-    - CRUD de:
-        - `tenant_locations`
-        - `services`
-        - `staff`
-        - `staff_schedules`
-        - `staff_services`
-
-    - Consultas de:
-        - `tenants` (solo lectura).
+- La guía debe reflejar la estructura real del módulo, no una estructura ideal o futura.
+- Si el módulo se expande, primero se implementa el cambio y después se actualiza este documento para describir únicamente lo que ya existe.
 
 ---
 
-### 3.2. DTO
+## 3. Alcance funcional vigente
 
-- Objetos de transporte de datos para las entidades de este dominio:
-    - `TenantLocationData`
-    - `ServiceData`
-    - `StaffData`
-    - `StaffScheduleData`
-    - `StaffServiceData`
+### 3.1. Lecturas agregadas del catálogo tenant
 
-- Se utilizan para agrupar datos de entrada/salida de UseCases y de la fachada del módulo.
-- No se mezclan `Request` de HTTP ni modelos dentro de estos DTO.
+`TenantEntitiesServiceInterface` expone actualmente estas lecturas:
 
----
+- `getByJid(string $jid): array`
+- `getCatalogByTenantId(int $tenantId): array`
+- `getByEspoCrmId(string $espocrmId): array`
+- `listStaffByTenantJid(string $tenantJid): array`
+- `getStaffByTenantJidAndId(string $tenantJid, int $staffId): array`
 
-### 3.3. UseCases
+Estas operaciones pueden devolver información combinada de:
 
-- Una clase por operación de negocio **específica**, organizada por subcarpeta de entidad.
+- `tenants`
+- `tenant_locations`
+- `services`
+- `service_categories`
+- `staff`
+- `staff_services`
+- `resources`
+- `resource_types`
+- `schedules`
+- `tenant_admins`
 
-- Para cada grupo:
-    - `TenantLocations/`:
-        - Crear, actualizar, eliminar, listar ubicaciones.
+### 3.2. Escrituras vigentes dentro del módulo
 
-    - `Services/`:
-        - Crear, actualizar, eliminar, listar servicios.
+Actualmente el módulo encapsula estos flujos de escritura:
 
-    - `Staff/`:
-        - Crear, actualizar, eliminar, listar staff.
+- Registro / actualización de `tenant_admins` mediante `registerTenantAdmin(TenantAdminData $tenantAdminData): array`
+- CRUD de `staff` mediante:
+  - `createStaff(string $tenantJid, StaffData $staffData): array`
+  - `updateStaff(string $tenantJid, int $staffId, StaffData $staffData): array`
+  - `deleteStaff(string $tenantJid, int $staffId): void`
 
-    - `StaffSchedules/`:
-        - Crear, actualizar, eliminar, listar horarios.
+La lógica de negocio asociada vive en:
 
-    - `StaffServices/`:
-        - Asignar, actualizar, remover, listar asignaciones staff-servicio.
+- `UseCases/Staff/CreateStaff.php`
+- `UseCases/Staff/UpdateStaff.php`
+- `UseCases/Staff/DeleteStaff.php`
+- `UseCases/Staff/ListStaff.php`
+- `UseCases/Staff/GetStaff.php`
+- `UseCases/TenantAdmins/RegisterTenantAdmin.php`
 
-    - `Tenants/`:
-        - Consultar tenant, consultar tenant con entidades relacionadas.
+Reglas vigentes de estos flujos:
 
-- La lógica de negocio del dominio de “estructura operativa del tenant” debe vivir dentro de estos casos de uso o coordinada por la fachada.
-
----
-
-### 3.4. Services
-
-- `TenantEntitiesService.php`:
-    - Es la **fachada** del módulo.
-    - Implementa `TenantEntitiesServiceInterface`.
-    - Agrupa y expone los métodos que el resto de la aplicación va a consumir para este dominio.
-    - Internamente coordina llamadas a UseCases y uso de DTOs.
-
-> Cualquier nueva operación para este dominio debe aparecer primero en la interfaz `TenantEntitiesServiceInterface` y luego en `TenantEntitiesService`.
-
----
-
-### 3.5. Providers
-
-- `TenantEntitiesServiceProvider.php`:
-    - Es el único lugar dentro del módulo donde se declaran los bindings del módulo hacia el container.
-    - Se encarga de vincular la interfaz `TenantEntitiesServiceInterface` con la implementación `TenantEntitiesService`.
+- La unicidad funcional de `tenant_admins` se resuelve por `tenant_id + channel_type + jid`.
+- Si el tenant aún no tiene owner, el primer admin registrado se promueve a `owner`.
+- No se permite degradar al owner actual sin un flujo explícito de transferencia.
+- No se permite crear un segundo `owner` activo para el mismo tenant.
+- El CRUD de `staff` resuelve el `tenant_id` desde `tenantJid`; el cliente no controla ese campo.
+- El CRUD de `staff` sólo edita `name`, `role`, `phone`, `email`, `is_active`, `settings.about` y `settings.specialty`.
+- `espocrm_id`, `service_ids` y `schedules` quedan fuera de escritura en este flujo.
+- La eliminación de `staff` es hard delete y depende de los cascades del esquema vigente.
+- Las escrituras de `staff` deben persistirse por modelo Eloquent para no romper los observers `updated` y `deleted`.
 
 ---
 
-## 4. Qué NO va dentro del módulo (nunca)
+## 4. Tablas del dominio y su papel
 
-Queda prohibido meter dentro de `app/Modules/TenantEntities`:
+### 4.1. Tablas principales operativas
 
-- Modelos Eloquent (`Tenant`, `TenantLocation`, `Service`, etc.).
-- Migraciones (todas siguen en `database/migrations/`).
-- Enums globales (`StaffRole`, `ServiceType`, etc.).
-- Repositorios (interfaces e implementaciones).
-- Lógica HTTP (Requests, Responses, controladores).
+- `tenants`: raíz del dominio tenant.
+- `tenant_locations`: sedes operativas del tenant.
+- `services`: servicios ofrecidos por el tenant.
+- `staff`: personal operativo del tenant.
+- `resources`: recursos físicos o lógicos asociados al tenant.
+- `schedules`: horarios polimórficos para `staff` y `resources`.
+- `staff_services`: relación N:M entre `staff` y `services`.
+- `tenant_admins`: administradores por canal del tenant.
 
-Estos elementos deben seguir viviendo en sus capas globales:
+### 4.2. Tablas catálogo o clasificación
 
-- Modelos: `app/Models/`
-- Migraciones: `database/migrations/`
-- Enums: `app/Enums/`
-- Repositorios: `app/Repositories/...`
-- Controladores: `app/Http/Controllers/...`
+- `resource_types`: catálogo global de tipos de recurso.
+- `service_categories`: clasificación de servicios por tenant.
 
-El módulo **solo** los usa, no los define.
+### 4.3. Tablas de integración
+
+- `integration_event_outbox`: outbox de eventos de integración por cambios operativos.
+- `integration_event_deliveries`: estado y reintentos de entrega por destino.
+
+Regla:
+
+- Aunque `integration_event_outbox` e `integration_event_deliveries` no pertenecen al CRUD operativo clásico del tenant, forman parte del modelo de datos del dominio documentado en `DocttoTenancyArchitecture.md` y deben considerarse al describir el ecosistema Tenant.
 
 ---
 
-## 5. Regla de dependencias
+## 5. Qué sí va dentro del módulo
 
-Orden de dependencias esperado:
+### 5.1. Contracts
 
-1. Controladores / capa HTTP
-2. `TenantEntitiesServiceInterface` (contrato del módulo)
-3. `TenantEntitiesService` (implementación de la fachada)
-4. UseCases bajo `UseCases/`
-5. Repositorios (interfaces globales)
-6. Repositorios Eloquent
-7. Modelos / DB
+- Interfaces públicas del módulo.
+- Hoy sólo existe `TenantEntitiesServiceInterface`.
+- Controladores, jobs y otros módulos deben depender de este contrato cuando consuman el catálogo agregado tenant, el CRUD de `staff` o el registro de `tenant_admins`.
+
+### 5.2. DTO
+
+- Objetos de transporte para operaciones del módulo.
+- Hoy existen `TenantAdminData` y `StaffData`.
+- No deben mezclarse `Request` HTTP ni modelos Eloquent dentro del DTO.
+
+### 5.3. UseCases
+
+- Encapsulan reglas de negocio específicas del módulo.
+- Hoy existen `TenantAdmins/RegisterTenantAdmin` y `Staff/{Create,Update,Delete,List,Get}Staff`.
+- Cualquier nueva escritura del dominio dentro de este módulo debe vivir en un caso de uso explícito antes de exponerse desde la fachada.
+
+### 5.4. Services
+
+- `TenantEntitiesService` es la fachada del módulo.
+- Implementa `TenantEntitiesServiceInterface`.
+- Coordina consultas agregadas sobre modelos y repositorios globales.
+- Coordina los casos de uso `RegisterTenantAdmin` y el CRUD de `staff`.
+
+### 5.5. Providers
+
+- `TenantEntitiesServiceProvider` concentra los bindings del módulo hacia el contenedor.
+
+---
+
+## 6. Qué NO va dentro del módulo
+
+Sigue prohibido meter dentro de `app/Modules/TenantEntities`:
+
+- Modelos Eloquent.
+- Migraciones.
+- Repositorios e interfaces de repositorio globales.
+- Enums globales.
+- Controladores, Requests o Responses HTTP.
+
+Estos elementos siguen viviendo en:
+
+- `app/Models/`
+- `database/migrations/`
+- `app/Repositories/`
+- `app/Repositories/Contracts/`
+- `app/Enums/`
+- `app/Http/Controllers/`
+
+---
+
+## 7. Regla de dependencias
+
+Orden esperado:
+
+1. Capa HTTP / jobs / listeners
+2. `TenantEntitiesServiceInterface`
+3. `TenantEntitiesService`
+4. UseCases del módulo
+5. Repositorios globales
+6. Modelos Eloquent / DB
 
 Reglas:
 
-- Controladores NO deben hablar directamente con repositorios para estas entidades; siempre pasan por `TenantEntitiesServiceInterface`.
-- UseCases NO interactúan con HTTP ni devuelven respuestas HTTP.
-- El módulo NO define repositorios nuevos, solo depende de los existentes.
+- El módulo puede apoyarse en modelos y repositorios globales, pero no redefinirlos.
+- Las reglas de negocio del módulo no deben quedar dispersas en controladores.
+- Las lecturas agregadas del tenant deben mantener consistencia con el modelo real: `schedules` sustituye a `staff_schedules`, y los horarios pueden pertenecer a `staff` o `resources`.
 
 ---
 
-## 6. Cuando se agregue nueva funcionalidad
+## 8. Regla de actualización documental
 
-Siempre seguir este patrón:
+Cada vez que cambie alguna de estas condiciones, este documento debe actualizarse:
 
-1. Determinar si la operación pertenece al dominio de `TenantEntities`.
-2. Si sí pertenece:
-    - Agregar método a `TenantEntitiesServiceInterface`.
-    - Implementar el método en `TenantEntitiesService`.
-    - Crear un nuevo UseCase bajo la subcarpeta correspondiente (si es necesario).
-    - Crear/ajustar DTO si la operación lo requiere.
+- Se agrega o elimina una tabla del dominio tenant.
+- Cambia una tabla vigente por otra (`staff_schedules` -> `schedules`, por ejemplo).
+- Se amplía la superficie pública de `TenantEntitiesServiceInterface`.
+- Se agregan nuevos DTO o UseCases dentro de `app/Modules/TenantEntities`.
 
-3. Asegurarse de no crear nuevas carpetas de nivel superior dentro del módulo que rompan la estructura acordada.
+La lista de tablas y responsabilidades aquí descrita debe mantenerse alineada con:
 
----
+- `database/migrations/*`
+- `app/Models/*`
+- `docs/DocttoTenancyArchitecture.md`

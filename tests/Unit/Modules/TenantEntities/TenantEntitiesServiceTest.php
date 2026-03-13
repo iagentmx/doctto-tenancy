@@ -19,7 +19,13 @@ use App\Models\Tenant;
 use App\Models\TenantAdmin;
 use App\Models\TenantLocation;
 use App\Modules\TenantEntities\Services\TenantEntitiesService;
+use App\Modules\TenantEntities\UseCases\Staff\CreateStaff;
+use App\Modules\TenantEntities\UseCases\Staff\DeleteStaff;
+use App\Modules\TenantEntities\UseCases\Staff\GetStaff;
+use App\Modules\TenantEntities\UseCases\Staff\ListStaff;
+use App\Modules\TenantEntities\UseCases\Staff\UpdateStaff;
 use App\Modules\TenantEntities\UseCases\TenantAdmins\RegisterTenantAdmin;
+use App\Repositories\Contracts\StaffRepositoryInterface;
 use App\Repositories\Contracts\TenantAdminRepositoryInterface;
 use App\Repositories\Contracts\TenantRepositoryInterface;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
@@ -320,11 +326,125 @@ class TenantEntitiesServiceTest extends TestCase
         }
     }
 
-    private function makeService(TenantRepositoryInterface $repository): TenantEntitiesService
+    public function test_staff_crud_methods_resolve_tenant_by_jid_and_map_staff_projection(): void
+    {
+        $tenant = new Tenant([
+            'id' => 20,
+            'jid' => '5217711986427@s.whatsapp.net',
+        ]);
+        $tenant->id = 20;
+
+        $serviceModel = new Service([
+            'id' => 3,
+            'tenant_id' => 20,
+            'name' => 'Consulta',
+        ]);
+        $serviceModel->id = 3;
+
+        $staff = new Staff([
+            'id' => 4,
+            'tenant_id' => 20,
+            'espocrm_id' => 'stf-1',
+            'name' => 'Dra. Perez',
+            'role' => StaffRole::Doctor,
+            'phone' => '7710000000',
+            'email' => 'dra@test.mx',
+            'is_active' => true,
+            'settings' => ['about' => 'Perfil', 'specialty' => 'Ortodoncia'],
+        ]);
+        $staff->id = 4;
+        $staff->setRelation('services', new EloquentCollection([$serviceModel]));
+
+        $repository = Mockery::mock(TenantRepositoryInterface::class);
+        $repository->shouldReceive('findTenantByJid')
+            ->times(5)
+            ->with('5217711986427@s.whatsapp.net')
+            ->andReturn($tenant);
+
+        $staffRepository = Mockery::mock(StaffRepositoryInterface::class);
+        $staffRepository->shouldReceive('listStaffByTenantId')
+            ->once()
+            ->with(20)
+            ->andReturn(new EloquentCollection([$staff]));
+        $staffRepository->shouldReceive('findStaffByTenantAndId')
+            ->times(3)
+            ->with(20, 4)
+            ->andReturn($staff);
+        $staffRepository->shouldReceive('createStaff')
+            ->once()
+            ->withArgs(function (array $data): bool {
+                return $data['tenant_id'] === 20
+                    && $data['name'] === 'Dra. Perez'
+                    && $data['role'] === 'doctor';
+            })
+            ->andReturn($staff);
+        $staffRepository->shouldReceive('updateStaff')
+            ->once()
+            ->withArgs(function (int $staffId, array $data): bool {
+                return $staffId === 4
+                    && $data['tenant_id'] === 20
+                    && $data['role'] === 'doctor';
+            })
+            ->andReturn($staff);
+        $staffRepository->shouldReceive('deleteStaffById')
+            ->once()
+            ->with(4);
+
+        $listStaff = new ListStaff($staffRepository);
+        $getStaff = new GetStaff($staffRepository);
+        $createStaff = new CreateStaff($staffRepository);
+        $updateStaff = new UpdateStaff($staffRepository);
+        $deleteStaff = new DeleteStaff($staffRepository);
+
+        $service = $this->makeService(
+            $repository,
+            $listStaff,
+            $getStaff,
+            $createStaff,
+            $updateStaff,
+            $deleteStaff,
+        );
+
+        $staffData = new \App\Modules\TenantEntities\DTO\StaffData(
+            tenantId: 0,
+            name: 'Dra. Perez',
+            role: 'doctor',
+            phone: '7710000000',
+            email: 'dra@test.mx',
+            isActive: true,
+            about: 'Perfil',
+            specialty: 'Ortodoncia',
+        );
+
+        $listResult = $service->listStaffByTenantJid('5217711986427@s.whatsapp.net');
+        $detailResult = $service->getStaffByTenantJidAndId('5217711986427@s.whatsapp.net', 4);
+        $createResult = $service->createStaff('5217711986427@s.whatsapp.net', $staffData);
+        $updateResult = $service->updateStaff('5217711986427@s.whatsapp.net', 4, $staffData);
+        $service->deleteStaff('5217711986427@s.whatsapp.net', 4);
+
+        $this->assertSame([3], $listResult[0]['service_ids']);
+        $this->assertSame('Ortodoncia', $detailResult['settings']['specialty']);
+        $this->assertSame('stf-1', $createResult['espocrm_id']);
+        $this->assertSame('doctor', $updateResult['role']);
+    }
+
+    private function makeService(
+        TenantRepositoryInterface $repository,
+        ?ListStaff $listStaff = null,
+        ?GetStaff $getStaff = null,
+        ?CreateStaff $createStaff = null,
+        ?UpdateStaff $updateStaff = null,
+        ?DeleteStaff $deleteStaff = null,
+    ): TenantEntitiesService
     {
         return new TenantEntitiesService(
             $repository,
             new RegisterTenantAdmin(Mockery::mock(TenantAdminRepositoryInterface::class)),
+            $listStaff ?? new ListStaff(Mockery::mock(StaffRepositoryInterface::class)),
+            $getStaff ?? new GetStaff(Mockery::mock(StaffRepositoryInterface::class)),
+            $createStaff ?? new CreateStaff(Mockery::mock(StaffRepositoryInterface::class)),
+            $updateStaff ?? new UpdateStaff(Mockery::mock(StaffRepositoryInterface::class)),
+            $deleteStaff ?? new DeleteStaff(Mockery::mock(StaffRepositoryInterface::class)),
         );
     }
 }

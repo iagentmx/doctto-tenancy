@@ -12,7 +12,7 @@ El servicio `Doctto-Tenancy` centraliza:
 ## 2. Módulos
 
 - `app/Modules/EspoCrmTenantIngestion`: adaptación de payloads de EspoCRM y orquestación de actualización local.
-- `app/Modules/TenantEntities`: casos de uso de dominio para tenant, locations, services, staff, schedules y relaciones.
+- `app/Modules/TenantEntities`: fachada del catálogo tenant, CRUD operativo de `staff` y casos de uso de dominio para tenant, staff, schedules y relaciones.
 - `app/Modules/NotifierEvents`: registro, dispatch y entrega de eventos de integración con patrón Outbox.
 
 ### 2.1 Eventos de integración por cambios operativos
@@ -335,6 +335,8 @@ Reglas de dominio vigentes:
 - `settings` se expone parcialmente en lecturas públicas y catálogo: sólo `about` y `specialty`.
 - La ingesta de staff resuelve dentro de una transacción: upsert de `staff`, reemplazo de schedules y sincronización de `staff_services`.
 - La sincronización de servicios usa los `servicesIds` de EspoCRM contra los servicios locales del mismo tenant.
+- El CRUD HTTP interno de `staff` resuelve el tenant por `tenantJid`, no permite editar `espocrm_id`, `service_ids` ni `schedules`, y responde usando la misma proyección pública de `TenantEntitiesService::mapStaff()`.
+- La eliminación expuesta por API es hard delete y depende de los cascades existentes para `staff_services` y `schedules`.
 
 ### 4.8 `schedules`
 
@@ -542,16 +544,22 @@ Los repositorios deben seguir:
 
 ## 6. API de lectura tenant
 
-Endpoints vigentes de consulta:
+Endpoints vigentes:
 
 - `GET /api/v1/tenants/{tenantJid}`
 - `GET /api/v1/tenants/{tenantId}/catalog`
 - `GET /api/v1/tenants/by-espocrm-id/{espocrmId}`
+- `GET /api/v1/tenants/{tenantJid}/staff`
+- `GET /api/v1/tenants/{tenantJid}/staff/{staffId}`
+- `POST /api/v1/tenants/{tenantJid}/staff`
+- `PATCH /api/v1/tenants/{tenantJid}/staff/{staffId}`
+- `DELETE /api/v1/tenants/{tenantJid}/staff/{staffId}`
 
 Reglas de acceso:
 
 - Las rutas de lectura usan el grupo middleware `api-secure`.
 - La autenticación de estas rutas depende de `App\Http\Middleware\ValidateApiToken`.
+- El sub-recurso `staff` comparte el mismo grupo `api-secure`.
 
 ### 6.1 Shape de `GET /api/v1/tenants/{tenantJid}`
 
@@ -614,3 +622,44 @@ Reglas de contrato:
 - La ruta busca por `tenants.espocrm_id`.
 - La respuesta actual expone el modelo crudo serializado y no la versión remapeada de catálogo.
 - Si este endpoint cambia de envelope en el futuro, este documento debe actualizarse para reflejar el contrato real.
+
+### 6.4 Shape del CRUD `GET|POST|PATCH|DELETE /api/v1/tenants/{tenantJid}/staff`
+
+Reglas de routing y validación:
+
+- El tenant se resuelve por `tenantJid` con el mismo criterio de validación usado por `GET /api/v1/tenants/{tenantJid}`.
+- `staffId` debe ser entero positivo.
+- Si el tenant no existe se responde `404 Tenant no encontrado`.
+- Si el `staff` no pertenece al tenant de la ruta se responde `404 Staff no encontrado`.
+
+Reglas de escritura:
+
+- `POST` y `PATCH` aceptan únicamente `name`, `role`, `phone`, `email`, `is_active`, `settings.about` y `settings.specialty`.
+- `tenant_id` se deriva de la ruta y nunca del payload.
+- `espocrm_id`, `service_ids` y `schedules` no forman parte del contrato editable.
+- `role` se valida contra `App\Enums\StaffRole::values()`.
+
+Shape de lectura y escritura exitosa (`GET`, `POST`, `PATCH`):
+
+- Envelope: `{ "status": "success", "data": {...} }`
+- `data.id`
+- `data.tenant_id`
+- `data.espocrm_id`
+- `data.name`
+- `data.role`
+- `data.phone`
+- `data.email`
+- `data.is_active`
+- `data.settings.about`
+- `data.settings.specialty`
+- `data.service_ids`
+
+Shape de eliminación exitosa (`DELETE`):
+
+- Envelope: `{ "status": "success", "data": [] }`
+
+Reglas de implementación:
+
+- Los controladores HTTP del sub-recurso `staff` consumen exclusivamente `TenantEntitiesServiceInterface`.
+- La lógica de negocio del CRUD vive en `app/Modules/TenantEntities/UseCases/Staff`.
+- El repositorio `App\Repositories\StaffRepository` opera por modelo Eloquent para preservar los observers de `staff.updated` y `staff.deleted`.

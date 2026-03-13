@@ -11,7 +11,13 @@ use App\Models\Tenant;
 use App\Models\TenantAdmin;
 use App\Models\TenantLocation;
 use App\Modules\TenantEntities\Contracts\TenantEntitiesServiceInterface;
+use App\Modules\TenantEntities\DTO\StaffData;
 use App\Modules\TenantEntities\DTO\TenantAdminData;
+use App\Modules\TenantEntities\UseCases\Staff\CreateStaff;
+use App\Modules\TenantEntities\UseCases\Staff\DeleteStaff;
+use App\Modules\TenantEntities\UseCases\Staff\GetStaff;
+use App\Modules\TenantEntities\UseCases\Staff\ListStaff;
+use App\Modules\TenantEntities\UseCases\Staff\UpdateStaff;
 use App\Modules\TenantEntities\UseCases\TenantAdmins\RegisterTenantAdmin;
 use App\Repositories\Contracts\TenantRepositoryInterface;
 
@@ -20,6 +26,11 @@ class TenantEntitiesService implements TenantEntitiesServiceInterface
     public function __construct(
         protected TenantRepositoryInterface $tenantRepository,
         protected RegisterTenantAdmin $registerTenantAdmin,
+        protected ListStaff $listStaff,
+        protected GetStaff $getStaff,
+        protected CreateStaff $createStaffUseCase,
+        protected UpdateStaff $updateStaffUseCase,
+        protected DeleteStaff $deleteStaffUseCase,
     ) {}
 
     /**
@@ -113,6 +124,17 @@ class TenantEntitiesService implements TenantEntitiesServiceInterface
             ],
             'service_ids' => $staff->services->pluck('id')->values()->all(),
         ];
+    }
+
+    private function findTenantOrFailByJid(string $jid): Tenant
+    {
+        $tenant = $this->tenantRepository->findTenantByJid($jid);
+
+        if (! $tenant) {
+            throw new ApiServiceException('Tenant no encontrado', 404);
+        }
+
+        return $tenant;
     }
 
     private function mapResource(Resource $resource): array
@@ -231,27 +253,27 @@ class TenantEntitiesService implements TenantEntitiesServiceInterface
         }
 
         $resourceSchedules = $tenant->resources
-            ->flatMap(fn (Resource $resource) => $resource->schedules);
+            ->flatMap(fn(Resource $resource) => $resource->schedules);
 
         $staffSchedules = $tenant->staff
-            ->flatMap(fn (Staff $staff) => $staff->schedules);
+            ->flatMap(fn(Staff $staff) => $staff->schedules);
 
         return [
             'tenant' => $this->mapTenant($tenant),
             'locations' => $tenant->tenantLocations
-                ->map(fn (TenantLocation $location) => $this->mapLocation($location))
+                ->map(fn(TenantLocation $location) => $this->mapLocation($location))
                 ->values()
                 ->all(),
             'staff' => $tenant->staff
-                ->map(fn (Staff $staff) => $this->mapStaff($staff))
+                ->map(fn(Staff $staff) => $this->mapStaff($staff))
                 ->values()
                 ->all(),
             'services' => $tenant->services
-                ->map(fn (Service $service) => $this->mapService($service))
+                ->map(fn(Service $service) => $this->mapService($service))
                 ->values()
                 ->all(),
             'service_categories' => $tenant->serviceCategories
-                ->map(fn ($category) => [
+                ->map(fn($category) => [
                     'id' => $category->id,
                     'tenant_id' => $category->tenant_id,
                     'name' => $category->name,
@@ -259,11 +281,11 @@ class TenantEntitiesService implements TenantEntitiesServiceInterface
                 ->values()
                 ->all(),
             'tenant_admins' => $tenant->tenantAdmins
-                ->map(fn (TenantAdmin $tenantAdmin) => $this->mapTenantAdmin($tenantAdmin))
+                ->map(fn(TenantAdmin $tenantAdmin) => $this->mapTenantAdmin($tenantAdmin))
                 ->values()
                 ->all(),
             'resources' => $tenant->resources
-                ->map(fn (Resource $resource) => $this->mapResource($resource))
+                ->map(fn(Resource $resource) => $this->mapResource($resource))
                 ->values()
                 ->all(),
             'schedules' => $staffSchedules
@@ -274,7 +296,7 @@ class TenantEntitiesService implements TenantEntitiesServiceInterface
                     ['day_of_week', 'asc'],
                     ['start_time', 'asc'],
                 ])
-                ->map(fn (Schedule $schedule) => $this->mapSchedule($schedule))
+                ->map(fn(Schedule $schedule) => $this->mapSchedule($schedule))
                 ->values()
                 ->all(),
         ];
@@ -285,6 +307,51 @@ class TenantEntitiesService implements TenantEntitiesServiceInterface
         return $this->mapTenantAdmin(
             $this->registerTenantAdmin->execute($tenantAdminData)
         );
+    }
+
+    public function listStaffByTenantJid(string $tenantJid): array
+    {
+        $tenant = $this->findTenantOrFailByJid($tenantJid);
+
+        return $this->listStaff
+            ->execute($tenant->id)
+            ->map(fn(Staff $staff) => $this->mapStaff($staff))
+            ->values()
+            ->all();
+    }
+
+    public function getStaffByTenantJidAndId(string $tenantJid, int $staffId): array
+    {
+        $tenant = $this->findTenantOrFailByJid($tenantJid);
+
+        return $this->mapStaff(
+            $this->getStaff->execute($tenant->id, $staffId)
+        );
+    }
+
+    public function createStaff(string $tenantJid, StaffData $staffData): array
+    {
+        $tenant = $this->findTenantOrFailByJid($tenantJid);
+
+        return $this->mapStaff(
+            $this->createStaffUseCase->execute($staffData->forTenant($tenant->id))
+        );
+    }
+
+    public function updateStaff(string $tenantJid, int $staffId, StaffData $staffData): array
+    {
+        $tenant = $this->findTenantOrFailByJid($tenantJid);
+
+        return $this->mapStaff(
+            $this->updateStaffUseCase->execute($tenant->id, $staffId, $staffData->forTenant($tenant->id))
+        );
+    }
+
+    public function deleteStaff(string $tenantJid, int $staffId): void
+    {
+        $tenant = $this->findTenantOrFailByJid($tenantJid);
+
+        $this->deleteStaffUseCase->execute($tenant->id, $staffId);
     }
 
     /**
